@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: @gembla_pro_bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: 8669092685:AAFJPLphJSir--96j18Vr8ACt4VQ686OM3o
+        sync: false
