@@ -1,9 +1,11 @@
 import logging
 import os
+import asyncio
 from datetime import datetime
 from typing import Dict, Set
 
 from dotenv import load_dotenv
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
@@ -414,11 +416,25 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             break
 
 
-# ==================== ЗАПУСК БОТА ====================
+# ==================== WEBHOOK + FLASK ====================
 
-async def post_init(application: Application) -> None:
-    """Действия после инициализации"""
-    await application.bot.set_my_commands([
+# Создаем Flask приложение
+flask_app = Flask(__name__)
+
+# Глобальная переменная для Application Telegram
+telegram_app = None
+
+
+async def setup_webhook():
+    """Установка вебхука при запуске"""
+    global telegram_app
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_URL')}/webhook/{BOT_TOKEN}"
+    
+    await telegram_app.bot.set_webhook(url=webhook_url)
+    logger.info(f"✅ Webhook установлен: {webhook_url}")
+    
+    # Устанавливаем команды бота
+    await telegram_app.bot.set_my_commands([
         BotCommand("start", "Перейти в основной канал"),
         BotCommand("help", "Помощь"),
         BotCommand("link", "Получить ссылку на канал"),
@@ -426,16 +442,39 @@ async def post_init(application: Application) -> None:
         BotCommand("admin", "Админ-панель (только для админа)"),
     ])
     
-    logger.info("Бот-переходник запущен!")
-    print("\n" + "="*50)
-    print("🤖 Telegram Bot-переходник запущен!")
-    print(f"🔗 Целевой канал: {TARGET_CHANNEL_LINK}")
-    print(f"👤 Админ ID: {ADMIN_ID}")
-    print("="*50 + "\n")
+    logger.info("Бот-переходник запущен на Webhook!")
 
+
+@flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
+    """Принимает обновления от Telegram"""
+    global telegram_app
+    
+    try:
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        await telegram_app.process_update(update)
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Ошибка в вебхуке: {e}")
+        return "error", 500
+
+
+@flask_app.route("/")
+def index():
+    return "Бот работает!", 200
+
+
+@flask_app.route("/health")
+def health():
+    return "OK", 200
+
+
+# ==================== ЗАПУСК ====================
 
 def main():
-    """Запуск бота"""
+    """Запуск бота с Webhook"""
+    global telegram_app
+    
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не указан в .env файле")
         print("❌ Ошибка: BOT_TOKEN не указан в .env файле")
@@ -447,30 +486,37 @@ def main():
     # Загружаем статистику
     load_stats()
     
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # Создаем приложение Telegram (без updater)
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("link", link_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("admin", admin_panel))
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("link", link_command))
+    telegram_app.add_handler(CommandHandler("stats", stats_command))
+    telegram_app.add_handler(CommandHandler("admin", admin_panel))
     
     # Регистрируем callback обработчики
-    application.add_handler(CallbackQueryHandler(about_callback, pattern="^about$"))
-    application.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
-    application.add_handler(CallbackQueryHandler(back_to_start, pattern="^back_to_start$"))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    telegram_app.add_handler(CallbackQueryHandler(about_callback, pattern="^about$"))
+    telegram_app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
+    telegram_app.add_handler(CallbackQueryHandler(back_to_start, pattern="^back_to_start$"))
+    telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
     
     # Обработка новых участников в группе
-    application.add_handler(MessageHandler(
+    telegram_app.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS,
         handle_new_member
     ))
     
-    # Запускаем бота
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Устанавливаем вебхук (в синхронном контексте)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_webhook())
+    
+    # Запускаем Flask сервер
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"Запуск Flask сервера на порту {port}")
+    flask_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
